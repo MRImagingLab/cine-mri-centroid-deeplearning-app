@@ -333,14 +333,25 @@ def load_model(ckpt_path_str: str, device: str):
     model.eval()
     return model, ckpt
 
-def run_inference(model, img2d: np.ndarray, canon_h=256, canon_w=256, beta=40.0,
-                  device="cpu", compute_peak=False, capture_features=False):
-
-        img_r = np.array(
-        Image.fromarray(img2d.astype(np.float32)).resize((canon_w, canon_h), resample=Image.BILINEAR),
-        dtype=np.float32
+def run_inference(
+    model,
+    img2d: np.ndarray,
+    canon_h=256,
+    canon_w=256,
+    beta=40.0,
+    device="cpu",
+    compute_peak=False,
+    capture_features=False,
+):
+    # Resize to canonical space (PIL, no cv2)
+    img_r = np.array(
+        Image.fromarray(img2d.astype(np.float32)).resize(
+            (canon_w, canon_h), resample=Image.BILINEAR
+        ),
+        dtype=np.float32,
     )
 
+    # Robust normalization (match training)
     img_rn = robust_normalize(img_r)
 
     X = torch.from_numpy(img_rn).unsqueeze(0).unsqueeze(0).to(device)  # [1,1,H,W]
@@ -348,11 +359,14 @@ def run_inference(model, img2d: np.ndarray, canon_h=256, canon_w=256, beta=40.0,
     hook = None
     feats = None
     if capture_features:
-        hook = FeatureHook(model, layer_names=["enc1.net", "enc2.net", "bot.net", "dec1.net", "out"])
+        hook = FeatureHook(
+            model, layer_names=["enc1.net", "enc2.net", "bot.net", "dec1.net", "out"]
+        )
 
     with torch.no_grad():
         z = model(X)                             # logits [1,1,H,W]
         p = spatial_softmax_2d_logits(z, beta)   # prob   [1,1,H,W]
+
         xy = expected_xy_from_prob(p)[0].cpu().numpy()
         pk = hard_argmax_xy(p)[0].cpu().numpy() if compute_peak else None
 
@@ -360,13 +374,14 @@ def run_inference(model, img2d: np.ndarray, canon_h=256, canon_w=256, beta=40.0,
             feats = {k: v.cpu() for k, v in hook.feats.items()}
             hook.close()
 
-    z2d = z[0, 0].detach().cpu().numpy().astype(np.float32)
+    z2d = z[0, 0].cpu().numpy().astype(np.float32)
     p2d = p[0, 0].cpu().numpy().astype(np.float32)
 
     xy_dsnt = (float(xy[0]), float(xy[1]))
     xy_peak = None if pk is None else (float(pk[0]), float(pk[1]))
 
-    return img_r.astype(np.float32), z2d, p2d, xy_dsnt, xy_peak, feats
+    return img_r, z2d, p2d, xy_dsnt, xy_peak, feats
+
 
 
 # ============================================================
@@ -654,4 +669,5 @@ with st.expander("How the network turns features into a probability map"):
              caption="Logits (higher = more likely centroid).", use_container_width=True)
     st.image(np.stack([(to01(p2d)*255).astype(np.uint8)]*3, axis=2),
              caption="Probability map after spatial softmax.", use_container_width=True)
+
 
