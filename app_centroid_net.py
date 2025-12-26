@@ -30,12 +30,12 @@ import os
 from pathlib import Path
 import numpy as np
 import scipy.io as sio
-import cv2
 import torch
 import torch.nn as nn
 import streamlit as st
 from PIL import Image
 from collections import OrderedDict
+from PIL import ImageDraw
 
 # ============================================================
 # Model definitions (MUST match training)
@@ -184,26 +184,22 @@ def overlay_heatmap(gray01: np.ndarray, heat01: np.ndarray, alpha: float = 0.35)
     return (out * 255).astype(np.uint8)
 
 def draw_cross_rgb(img_rgb_u8: np.ndarray, x: float, y: float, color_rgb, r: int = 6, t: int = 2) -> np.ndarray:
-    """
-    Draw a cross at (x,y) in 1-based coords (x=col, y=row).
-    """
     H, W, _ = img_rgb_u8.shape
     cx = int(round(x - 1))
     cy = int(round(y - 1))
     cx = max(0, min(W - 1, cx))
     cy = max(0, min(H - 1, cy))
 
-    bgr = (int(color_rgb[2]), int(color_rgb[1]), int(color_rgb[0]))
-    img_bgr = img_rgb_u8[..., ::-1].copy()
-    cv2.line(img_bgr, (cx - r, cy), (cx + r, cy), bgr, t)
-    cv2.line(img_bgr, (cx, cy - r), (cx, cy + r), bgr, t)
-    return img_bgr[..., ::-1]
+    im = Image.fromarray(img_rgb_u8)
+    dr = ImageDraw.Draw(im)
+    # thickness via repeated lines
+    for k in range(-(t//2), (t//2)+1):
+        dr.line([(cx - r, cy + k), (cx + r, cy + k)], fill=tuple(color_rgb), width=1)
+        dr.line([(cx + k, cy - r), (cx + k, cy + r)], fill=tuple(color_rgb), width=1)
+    return np.array(im, dtype=np.uint8)
+
 
 def draw_roi_box_rgb(img_rgb_u8: np.ndarray, x: float, y: float, box_w: int, box_h: int, color_rgb, t: int = 2) -> np.ndarray:
-    """
-    Draw a rectangle centered at (x,y) in 1-based coords.
-    box_w/box_h are in pixels in the SAME space as img_rgb_u8.
-    """
     H, W, _ = img_rgb_u8.shape
     cx = int(round(x - 1))
     cy = int(round(y - 1))
@@ -211,26 +207,18 @@ def draw_roi_box_rgb(img_rgb_u8: np.ndarray, x: float, y: float, box_w: int, box
     half_w = int(round(box_w / 2))
     half_h = int(round(box_h / 2))
 
-    x0 = cx - half_w
-    x1 = cx + half_w
-    y0 = cy - half_h
-    y1 = cy + half_h
+    x0 = max(0, min(W - 1, cx - half_w))
+    x1 = max(0, min(W - 1, cx + half_w))
+    y0 = max(0, min(H - 1, cy - half_h))
+    y1 = max(0, min(H - 1, cy + half_h))
 
-    # clip
-    x0 = max(0, min(W - 1, x0))
-    x1 = max(0, min(W - 1, x1))
-    y0 = max(0, min(H - 1, y0))
-    y1 = max(0, min(H - 1, y1))
+    im = Image.fromarray(img_rgb_u8)
+    dr = ImageDraw.Draw(im)
+    # thickness by drawing multiple rectangles
+    for k in range(t):
+        dr.rectangle([x0 - k, y0 - k, x1 + k, y1 + k], outline=tuple(color_rgb))
+    return np.array(im, dtype=np.uint8)
 
-    if x1 < x0:
-        x0, x1 = x1, x0
-    if y1 < y0:
-        y0, y1 = y1, y0
-
-    bgr = (int(color_rgb[2]), int(color_rgb[1]), int(color_rgb[0]))
-    img_bgr = img_rgb_u8[..., ::-1].copy()
-    cv2.rectangle(img_bgr, (x0, y0), (x1, y1), bgr, t)
-    return img_bgr[..., ::-1]
 
 def canon_to_raw(xy_canon, orig_h: int, orig_w: int, canon_h: int, canon_w: int):
     """
@@ -348,7 +336,11 @@ def load_model(ckpt_path_str: str, device: str):
 def run_inference(model, img2d: np.ndarray, canon_h=256, canon_w=256, beta=40.0,
                   device="cpu", compute_peak=False, capture_features=False):
 
-    img_r = cv2.resize(img2d, (canon_w, canon_h), interpolation=cv2.INTER_LINEAR)
+        img_r = np.array(
+        Image.fromarray(img2d.astype(np.float32)).resize((canon_w, canon_h), resample=Image.BILINEAR),
+        dtype=np.float32
+    )
+
     img_rn = robust_normalize(img_r)
 
     X = torch.from_numpy(img_rn).unsqueeze(0).unsqueeze(0).to(device)  # [1,1,H,W]
@@ -662,3 +654,4 @@ with st.expander("How the network turns features into a probability map"):
              caption="Logits (higher = more likely centroid).", use_container_width=True)
     st.image(np.stack([(to01(p2d)*255).astype(np.uint8)]*3, axis=2),
              caption="Probability map after spatial softmax.", use_container_width=True)
+
